@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+# your work files: never commit game data
+*.arc
+*.arc.bak
+*.tex
+/originals/
+/my_edits/
+/exports/
+.DS_Store
+Thumbs.db

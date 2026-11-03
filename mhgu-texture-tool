@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# mhgu-texture-tool : launcher for the MHGU Mod Texture Editor (Linux).
+#   mhgu-texture-tool [MOD.zip | MOD_FOLDER]      open the editor
+#   mhgu-texture-tool mod ... / list ... / -h     command-line tools
+# First run: makes a private Python environment (on top of the system's numpy / Pillow / tk) and installs
+# tkinterdnd2 into it for drag and drop. Arch's system Python refuses pip installs (PEP 668), hence the venv.
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SCRIPT="$APP_DIR/mhgu_tex_tool.py"
+DATA="${XDG_DATA_HOME:-$HOME/.local/share}/mhgu-texture-tool"
+VENV="$DATA/venv"
+PY="${MHGU_PYTHON:-python3}"
+
+die() { echo "mhgu-texture-tool: $*" >&2; command -v notify-send >/dev/null && notify-send "MHGU Texture Tool" "$*" || true; exit 1; }
+
+command -v "$PY" >/dev/null || die "python3 not found: sudo pacman -S python"
+"$PY" -c 'import tkinter' 2>/dev/null || die "Tk is missing: sudo pacman -S tk"
+
+if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -c 'import sys' 2>/dev/null; then
+    echo "First run: setting up $VENV ..."
+    rm -rf "$VENV"
+    "$PY" -m venv --system-site-packages "$VENV" || die "could not create the Python environment in $VENV"
+fi
+# (re)install what is missing: after a Python upgrade the venv may need its packages again
+if ! "$VENV/bin/python" -c 'import numpy, PIL.ImageTk' 2>/dev/null; then
+    echo "Installing numpy / Pillow into $VENV (better: sudo pacman -S python-numpy python-pillow)..."
+    "$VENV/bin/python" -m pip install -q numpy Pillow || die "could not install numpy / Pillow"
+fi
+if ! "$VENV/bin/python" -c 'import tkinterdnd2' 2>/dev/null; then
+    echo "Installing tkinterdnd2 (drag and drop)..."
+    "$VENV/bin/python" -m pip install -q 'tkinterdnd2>=0.4.3' || echo "warning: no drag and drop (tkinterdnd2 failed to install); the buttons still work" >&2
+fi
+
+exec "$VENV/bin/python" "$SCRIPT" "$@"
