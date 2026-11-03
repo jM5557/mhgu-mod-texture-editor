@@ -212,6 +212,52 @@ class TestModSession(unittest.TestCase):
         self.assertEqual(names, ['em057_01_01_BM', 'helm_BM'])
         self.assertTrue(any('nothing.png' in n for n in notes))
 
+    def test_export_unpacked_and_reapply_raw_tex(self):
+        s = self.session()
+        k, _ = self.stage_body(s)
+        i = s.arcs[k].tex[0]
+        out = os.path.join(self.dir, 'unpacked')
+        self.assertEqual(s.export_unpacked(out, with_png=True, log=lambda m: None), 1)
+        base = os.path.join(out, *self.arc_path[:-4].split('/'), 'enemy', 'em057', 'em057_01', 'mod', 'em057_01_01_BM')
+        self.assertTrue(os.path.isfile(base + '.tex') and os.path.isfile(base + '.png'))
+        with open(base + '.tex', 'rb') as f:
+            self.assertEqual(f.read(), s.staged[(k, i)]['tex'])
+        # the same folder applied to a fresh copy of the mod: the .tex wins over its PNG copy, bytes unchanged
+        s2 = self.session()
+        found, notes = s2.match_images(out)
+        self.assertEqual([os.path.splitext(p)[1] for p in found.values()], ['.tex'])
+        self.assertEqual(notes, [])
+        (k2, i2), p = next(iter(found.items()))
+        s2.stage(k2, i2, p)
+        self.assertEqual(s2.staged[(k2, i2)]['tex'], s.staged[(k, i)]['tex'])
+
+    def test_compare_zip_and_folder(self):
+        a = self.session()
+        b_dir = os.path.join(self.dir, 'b')
+        zipfile.ZipFile(self.zip).extractall(b_dir)
+        root = os.path.join(b_dir, 'MH4U Port')
+        os.remove(os.path.join(root, *self.helm_path.split('/')[1:]))                        # only in A
+        img = smooth(32, 32)
+        with open(os.path.join(root, 'romfs', 'nativeNX', 'arc', 'enemy', 'extra.arc'), 'wb') as f:  # only in B
+            f.write(M.arc_build([('enemy\\extra\\x_BM', M.TEX_TYPE, make_tex('bc1', 32, 32, img))]))
+        arc = os.path.join(root, *self.arc_path.split('/')[1:])                                # changed in B
+        _, ents = M.arc_read(open(arc, 'rb').read())
+        ents[2] = (ents[2][0], ents[2][1], make_tex('bc5', 256, 64, smooth(256, 64)[:, ::-1].copy()))
+        with open(arc, 'wb') as f:
+            f.write(M.arc_build(ents, level=1))                  # other zlib level: same entries must stay 'same'
+        b = M.ModSession(root, log=lambda m: None)
+        self.addCleanup(b.close)
+        rows = M.compare_mods(a, b, log=lambda m: None)
+        got = sorted((r['status'], r['texture'].split('\\')[-1]) for r in rows)
+        self.assertEqual(got, [('changed', 'em057_01_01_NM'), ('only A', 'helm_BM'), ('only B', 'x_BM')])
+        self.assertTrue(all(r['key'].startswith('romfs/nativeNX/') for r in rows))
+        rows_all = M.compare_mods(a, b, log=lambda m: None, same=True)
+        self.assertIn('same', {r['status'] for r in rows_all})
+        csv_path = os.path.join(self.dir, 'r.csv')
+        M.write_compare_csv(rows, a, b, csv_path)
+        self.assertEqual(len(open(csv_path).read().strip().splitlines()), 4)
+        self.assertEqual(M.export_compare_pngs(rows, a, b, os.path.join(self.dir, 'pngs'), log=lambda m: None), 4)
+
     def test_folder_source_refuses_writing_into_itself(self):
         src = os.path.join(self.dir, 'src')
         zipfile.ZipFile(self.zip).extractall(src)

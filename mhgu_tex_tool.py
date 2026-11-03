@@ -10,7 +10,10 @@ replacements (Undo under the preview), then export the whole mod or a patch with
 folder or a zip.  Command line:
 
   mod     MOD.zip|FOLDER [--list] [--export-pngs DIR] [--images DIR] [--out DEST(.zip)] [--patch]
-                                               the GUI flow without the GUI
+          [--out-unpacked DIR [--no-png]]      the GUI flow without the GUI; --out-unpacked: only the changed
+                                               textures as .tex (+ .png) in unpacked-arc folders
+  compare MOD_A MOD_B [--csv F] [--export-pngs DIR] [--all]
+                                               textures that differ between two mods (folders or zips)
 
   list    ARC                                  list the textures in an arc
   export  ARC OUTDIR [--mips]                  every texture -> OUTDIR/<internal path>.png (+ textures.json)
@@ -36,7 +39,7 @@ Requires Python 3.9+, numpy, Pillow (+ tkinterdnd2 for drag and drop).
 """
 import argparse, json, os, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
 
-__version__ = '1.0.0'
+__version__ = '1.1.0'
 
 import numpy as np
 
@@ -835,6 +838,13 @@ def cmd_scan(a):
 # =============================================================== mod session (logic behind the GUI)
 
 IMAGE_EXT = ('.png', '.jpg', '.jpeg', '.tga', '.bmp', '.tif', '.tiff', '.webp', '.dds')
+RAW_EXT = ('.tex', '.%08x' % TEX_TYPE)   # an MHGU TEX file as unpackers write it (ARCtool style: .tex; ours: .241f5deb)
+
+
+def strip_ext(name):
+    """file name without its image / raw texture extension."""
+    base, ext = os.path.splitext(name)
+    return base if ext.lower() in IMAGE_EXT + RAW_EXT else name
 
 
 class ArcFile:
@@ -944,6 +954,8 @@ class ModSession:
         """encode image_path for texture (k, i); returns the notes (alpha kept, size / aspect warnings)."""
         orig = self.arcs[k].read(i)
         h = tex_parse(orig)
+        if os.path.splitext(image_path)[1].lower() in RAW_EXT:
+            return self.stage_tex(k, i, image_path, h)
         if not h['supported']:
             raise ValueError('this texture type cannot be replaced (%s)' % describe(h))
         img, has_a = load_png(image_path)
@@ -952,6 +964,22 @@ class ModSession:
         new = tex_encode(img, h)
         tex_decode(new)
         self.staged[(k, i)] = dict(src=image_path, tex=new, notes=notes)
+        return notes
+
+    def stage_tex(self, k, i, path, orig_h=None):
+        """a ready MHGU TEX file (e.g. from Export unpacked changes) goes in unchanged."""
+        with open(long_path(path), 'rb') as f:
+            data = f.read()
+        h = tex_parse(data)
+        if h['version'] != 0xA0:
+            raise ValueError('%s is not an MHGU (Switch) texture (version %#x)' % (os.path.basename(path), h['version']))
+        notes = ['raw .tex file, used as it is']
+        o = orig_h or tex_parse(self.arcs[k].read(i))
+        if (h['fmt'], h['width'], h['height']) != (o['fmt'], o['width'], o['height']):
+            notes.append('differs from the original: %s -> %s' % (describe(o).split('  (')[0], describe(h).split('  (')[0]))
+        if h['supported']:
+            tex_decode(data)
+        self.staged[(k, i)] = dict(src=path, tex=data, notes=notes)
         return notes
 
     def unstage(self, k, i):
@@ -988,7 +1016,7 @@ class ModSession:
         for dp, _, fs in os.walk(folder):
             for f in sorted(fs):
                 stem, ext = os.path.splitext(f)
-                if ext.lower() not in IMAGE_EXT or '.mip' in stem.lower():
+                if ext.lower() not in IMAGE_EXT + RAW_EXT or '.mip' in stem.lower():
                     continue
                 path = os.path.join(dp, f)
                 rel = os.path.splitext(os.path.relpath(path, folder))[0].replace(os.sep, '/').lower()
@@ -1004,8 +1032,15 @@ class ModSession:
                         notes.append('%s: no texture with this name' % f)
                         continue
                 if hit in found:
-                    notes.append('%s and %s both match %s; kept the first'
-                                  % (os.path.basename(found[hit]), f, self.arcs[hit[0]].entries[hit[1]][0]))
+                    prev = found[hit]
+                    raw_now = ext.lower() in RAW_EXT
+                    raw_prev = os.path.splitext(prev)[1].lower() in RAW_EXT
+                    same = strip_ext(os.path.basename(prev)).lower() == stem.lower()
+                    if same and raw_now and not raw_prev:
+                        found[hit] = path            # the exact .tex wins over its PNG copy
+                    elif not (same and raw_prev and not raw_now):
+                        notes.append('%s and %s both match %s; kept the first'
+                                     % (os.path.basename(prev), f, self.arcs[hit[0]].entries[hit[1]][0]))
                     continue
                 found[hit] = path
         return found, notes
@@ -1070,10 +1105,147 @@ class ModSession:
                sum(len(self.staged_in(k)) for k in mods.values())))
         return len(files), n_mod
 
+    def export_unpacked(self, dest, with_png=True, log=print):
+        """only the staged textures, unpacked: DEST/<arc path minus .arc>/<texture path>.tex (+ .png), the layout of an
+        unpacked arc (one folder per arc, its internal paths). Copy it over other unpacked mods, or stage it into a
+        packed mod with Stage images from folder. Writes DEST/_changes.json."""
+        if not self.staged:
+            raise ValueError('nothing is staged')
+        self.check_dest(dest)
+        items = []
+        for (k, i) in sorted(self.staged):
+            a, st = self.arcs[k], self.staged[(k, i)]
+            path = a.entries[i][0]
+            base = os.path.join(dest, *a.stem.split('/'), *path.split('\\'))
+            atomic_write_file(base + '.tex', st['tex'])
+            h = tex_parse(st['tex'])
+            if with_png and h['supported']:
+                save_png(tex_decode(st['tex']), base + '.png')
+            items.append(dict(arc=a.logical, texture=path, file=rel_join(a.stem, path) + '.tex',
+                              format=h['fmt_name'], width=h['width'], height=h['height'],
+                              source_image=os.path.basename(st['src'])))
+            log('  %s' % rel_join(a.stem, path))
+        with open(long_path(os.path.join(dest, '_changes.json')), 'w', encoding='utf-8') as f:
+            json.dump(dict(tool='MHGU Mod Texture Editor %s' % __version__, mod=self.src, textures=items), f, indent=1)
+        log('%d changed texture(s) written unpacked to %s%s' % (len(items), dest, ' (+ PNG copies)' if with_png else ''))
+        return len(items)
+
     def close(self):
         if self.tmp:
             shutil.rmtree(self.tmp, ignore_errors=True)
             self.tmp = None
+
+
+def rel_join(stem, internal):
+    return stem + '/' + internal.replace('\\', '/')
+
+
+def atomic_write_file(path, data):
+    path = long_path(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + '.part', 'wb') as f:
+        f.write(data)
+    os.replace(path + '.part', path)
+
+# ---------------------------------------------------------------- compare two mods
+
+def mod_key(session, logical):
+    """a path both mods share, whatever folder they were opened at: from 'romfs/' (or 'nativeNX/') on when present,
+    else the path below the mod's own top folder."""
+    parts = logical.split('/')
+    low = [p.lower() for p in parts]
+    for anchor in ('romfs', 'nativenx'):
+        if anchor in low:
+            return '/'.join(parts[low.index(anchor):])
+    if session.prefix and parts[0] == session.prefix:
+        parts = parts[1:]
+    return '/'.join(parts)
+
+
+def compare_mods(a, b, log=print, same=False):
+    """two ModSessions -> rows {key, arc_a, arc_b, texture, status: changed | only A | only B | same, a: (k, i),
+    b: (k, i)} for every texture entry that differs (contents compared after decompression)."""
+    shown = {}
+    ma, mb = {}, {}
+    for sess, m in ((b, mb), (a, ma)):              # A's spelling wins for display
+        for k in sess.tex_arcs:
+            p = mod_key(sess, sess.arcs[k].logical)
+            m[p.lower()] = k
+            shown[p.lower()] = p
+    rows = []
+    keys = sorted(set(ma) | set(mb))
+    for n, key in enumerate(keys, 1):
+        ka, kb = ma.get(key), mb.get(key)
+        ea = {a.arcs[ka].entries[i][0].lower(): i for i in a.arcs[ka].tex} if ka is not None else {}
+        eb = {b.arcs[kb].entries[i][0].lower(): i for i in b.arcs[kb].tex} if kb is not None else {}
+        both = ka is not None and kb is not None
+        if both:
+            _, da = load_arc(a.arcs[ka].fs_path)
+            _, db = load_arc(b.arcs[kb].fs_path)
+        for name in sorted(set(ea) | set(eb)):
+            ia, ib = ea.get(name), eb.get(name)
+            if ia is not None and ib is not None:
+                status = 'same' if da[ia][2] == db[ib][2] else 'changed'
+            else:
+                status = 'only A' if ia is not None else 'only B'
+            if status == 'same' and not same:
+                continue
+            rows.append(dict(key=shown[key], arc_a=a.arcs[ka].logical if ka is not None else '',
+                             arc_b=b.arcs[kb].logical if kb is not None else '',
+                             texture=(a.arcs[ka].entries[ia][0] if ia is not None else b.arcs[kb].entries[ib][0]),
+                             status=status, a=(ka, ia) if ia is not None else None, b=(kb, ib) if ib is not None else None))
+        if n % 20 == 0:
+            log('  compared %d / %d arcs' % (n, len(keys)))
+    return rows
+
+
+def compare_summary(rows):
+    c = {}
+    for r in rows: c[r['status']] = c.get(r['status'], 0) + 1
+    return ', '.join('%d %s' % (c[k], k) for k in ('changed', 'only A', 'only B', 'same') if k in c) or 'no differences'
+
+
+def write_compare_csv(rows, a, b, path):
+    import csv
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(['status', 'arc', 'texture', 'A format', 'A size', 'B format', 'B size'])
+        for r in rows:
+            def side(s, ki):
+                if not ki: return ['', '']
+                h = s.arcs[ki[0]].header(ki[1])
+                return [h.get('fmt_name') or '?', '%dx%d' % (h.get('width', 0), h.get('height', 0))]
+            w.writerow([r['status'], r['key'], r['texture']] + side(a, r['a']) + side(b, r['b']))
+
+
+def export_compare_pngs(rows, a, b, dest, log=print):
+    """dest/A/<arc path>/<texture>.png and dest/B/... for every differing texture."""
+    n = 0
+    for r in rows:
+        stem = r['key'][:-4] if r['key'].endswith('.arc') else r['key']
+        for side, s, ki in (('A', a, r['a']), ('B', b, r['b'])):
+            if not ki or not s.arcs[ki[0]].header(ki[1]).get('supported'):
+                continue
+            save_png(tex_decode(s.arcs[ki[0]].read(ki[1])),
+                     os.path.join(dest, side, *stem.split('/'), *r['texture'].split('\\')) + '.png')
+            n += 1
+    log('%d PNG(s) written to %s (A/ and B/)' % (n, dest))
+    return n
+
+
+def cmd_compare(a):
+    sa, sb = ModSession(a.mod_a, log=lambda m: None), ModSession(a.mod_b, log=lambda m: None)
+    try:
+        rows = compare_mods(sa, sb, log=lambda m: None, same=a.all)
+        print('A: %s\nB: %s\n%s' % (a.mod_a, a.mod_b, compare_summary(rows)))
+        for r in rows:
+            print('  %-8s %s : %s' % (r['status'], r['key'], r['texture']))
+        if a.csv:
+            write_compare_csv(rows, sa, sb, a.csv); print('report:', a.csv)
+        if a.export_pngs:
+            export_compare_pngs([r for r in rows if r['status'] != 'same'], sa, sb, a.export_pngs)
+    finally:
+        sa.close(); sb.close()
 
 
 def _now_zip():
@@ -1103,6 +1275,10 @@ def cmd_mod(a):
             if not s.staged and a.patch:
                 sys.exit('nothing to patch: no image matched a texture')
             s.export(a.out, a.out.lower().endswith('.zip'), a.patch)
+        if a.out_unpacked:
+            if not s.staged:
+                sys.exit('nothing to export: no image matched a texture')
+            s.export_unpacked(a.out_unpacked, with_png=not a.no_png)
     finally:
         s.close()
 
@@ -1488,7 +1664,9 @@ def gui(initial=None):
     def replace_dialog():
         t = selected_tex()
         if not t: return
-        p = pick('open', 'Replacement image', [('Images', ' '.join('*' + e for e in IMAGE_EXT + tuple(x.upper() for x in IMAGE_EXT))), ('All files', '*')])
+        p = pick('open', 'Replacement image (or an MHGU .tex)', [
+            ('Images', ' '.join('*' + e for e in IMAGE_EXT + tuple(x.upper() for x in IMAGE_EXT))),
+            ('MHGU textures', '*.tex *.TEX'), ('All files', '*')])
         if p: stage(*t, p)
 
     def undo():
@@ -1534,6 +1712,183 @@ def gui(initial=None):
         if not s: return
         d = pick('dir', 'Export every original texture as PNG into…')
         if d: submit(lambda: s.export_pngs(d, log), None, 'Exporting PNGs…')
+
+    def export_unpacked():
+        s = st['s']
+        if not s: return
+        if not s.staged:
+            messagebox.showinfo('Export unpacked changes', 'Nothing is staged yet.'); return
+        if pending[0]:
+            messagebox.showinfo('Busy', 'Wait for the current encodes to finish.'); return
+        d = pick('dir', 'Folder for the unpacked changes')
+        if not d: return
+        try:
+            s.check_dest(d)
+        except ValueError as e:
+            messagebox.showerror('Export unpacked changes', str(e)); return
+        k, i = sorted(s.staged)[0]
+        sample = os.path.join(d, *s.arcs[k].stem.split('/'), *s.arcs[k].entries[i][0].split('\\')) + '.tex'
+        ans = messagebox.askyesnocancel('Export unpacked changes', (
+            'Writes only the %d changed texture(s), unpacked, one folder per arc, e.g.\n\n%s\n\n'
+            'Also save a PNG copy next to each .tex?') % (len(s.staged), sample))
+        if ans is None: return
+        submit(lambda: s.export_unpacked(d, with_png=ans, log=log),
+               lambda n: messagebox.showinfo('Export unpacked changes', '%d texture(s) written to\n%s' % (n, d)),
+               'Exporting unpacked changes…')
+
+    # ------------------------------------------------------------ compare two mods
+    def compare_window():
+        w = tk.Toplevel(root); w.title('Compare mods'); w.geometry('1200x720')
+        cs = dict(a=None, b=None, rows=[], token=0, photos=[None, None])
+        top = ttk.Frame(w, padding=8); top.pack(fill='x')
+        va, vb = tk.StringVar(), tk.StringVar()
+        for r, (lbl, var) in enumerate((('Mod A:', va), ('Mod B:', vb))):
+            ttk.Label(top, text=lbl).grid(row=r, column=0, sticky='w')
+            ttk.Entry(top, textvariable=var, width=90).grid(row=r, column=1, sticky='ew', padx=4, pady=2)
+            ttk.Button(top, text='Folder…', command=lambda v=var: v.set(pick('dir', 'Mod folder', parent=w) or v.get())
+                       ).grid(row=r, column=2)
+            ttk.Button(top, text='Zip…', command=lambda v=var: v.set(pick('open', 'Mod zip', [
+                ('Zip archive', '*.zip *.ZIP'), ('All files', '*')], parent=w) or v.get())).grid(row=r, column=3, padx=(4, 0))
+        top.columnconfigure(1, weight=1)
+        same = tk.BooleanVar(value=False)
+        bf = ttk.Frame(w, padding=(8, 0)); bf.pack(fill='x')
+        b_cmp = ttk.Button(bf, text='Compare'); b_cmp.pack(side='left')
+        ttk.Checkbutton(bf, text='List identical textures too', variable=same).pack(side='left', padx=8)
+        b_csv = ttk.Button(bf, text='Save report (CSV)…'); b_csv.pack(side='right')
+        b_pngs = ttk.Button(bf, text='Export differing textures as PNG…'); b_pngs.pack(side='right', padx=4)
+        summary = ttk.Label(w, text='Choose two mods (folders or zips), then Compare.', padding=(8, 4)); summary.pack(fill='x')
+        pw = ttk.PanedWindow(w, orient='horizontal'); pw.pack(fill='both', expand=True, padx=8, pady=(0, 8))
+        lf = ttk.Frame(pw); rf = ttk.Frame(pw, padding=(8, 0, 0, 0)); pw.add(lf, weight=3); pw.add(rf, weight=2)
+        ct = ttk.Treeview(lf, columns=('status', 'a', 'b'), selectmode='browse')
+        for c, wd, t in (('#0', 420, 'Arc / texture'), ('status', 80, 'Status'), ('a', 120, 'A'), ('b', 120, 'B')):
+            ct.heading(c, text=t, anchor='w'); ct.column(c, width=wd, stretch=(c == '#0'))
+        for tag, col in (('changed', '#b35900'), ('only A', '#1f6fb2'), ('only B', '#2e8b57'), ('same', '#888')):
+            ct.tag_configure(tag, foreground=col)
+        csb = ttk.Scrollbar(lf, command=ct.yview); ct.configure(yscrollcommand=csb.set)
+        ct.pack(side='left', fill='both', expand=True); csb.pack(side='left', fill='y')
+        pv = ttk.Frame(rf); pv.pack(fill='both', expand=True)
+        cells = []
+        for col, name in enumerate(('A', 'B')):
+            fr = ttk.Frame(pv); fr.grid(row=0, column=col, sticky='nsew', padx=2)
+            pv.columnconfigure(col, weight=1)
+            ttk.Label(fr, text=name, font=('TkDefaultFont', 10, 'bold')).pack()
+            lab = tk.Label(fr, bg='#d9d9d9', relief='groove', bd=2, text='', fg='#555', width=10)
+            lab.pack(fill='both', expand=True)
+            inf = ttk.Label(fr, text='', wraplength=240, justify='left'); inf.pack(fill='x')
+            cells.append((lab, inf))
+        pv.rowconfigure(0, weight=1)
+        cbg = tk.StringVar(value='checker')
+        of = ttk.Frame(rf); of.pack(fill='x', pady=(4, 0))
+        for t, v in (('Checker', 'checker'), ('RGB', 'rgb'), ('Alpha', 'alpha')):
+            ttk.Radiobutton(of, text=t, variable=cbg, value=v, command=lambda: cshow()).pack(side='left')
+
+        def close_sessions():
+            for k in ('a', 'b'):
+                if cs[k]: cs[k].close(); cs[k] = None
+
+        def side_text(sess, ki):
+            if not ki: return '-'
+            h = sess.arcs[ki[0]].header(ki[1])
+            return '%s %dx%d' % (h.get('fmt_name') or '?', h.get('width', 0), h.get('height', 0))
+
+        def run():
+            pa, pb = va.get().strip(), vb.get().strip()
+            if not (pa and pb and os.path.exists(pa) and os.path.exists(pb)):
+                messagebox.showinfo('Compare', 'Choose two existing mods (folders or zips).', parent=w); return
+            if os.path.abspath(pa) == os.path.abspath(pb):
+                messagebox.showinfo('Compare', 'Mod A and mod B are the same file.', parent=w); return
+            close_sessions(); ct.delete(*ct.get_children())
+            want_same = same.get()
+
+            def job():
+                sa = ModSession(pa, log=log); sb = ModSession(pb, log=log)
+                try:
+                    return sa, sb, compare_mods(sa, sb, log=log, same=want_same)
+                except Exception:
+                    sa.close(); sb.close(); raise
+
+            def done(r):
+                cs['a'], cs['b'], cs['rows'] = r
+                fill()
+                txt = compare_summary(cs['rows'])
+                summary.config(text='%s   (A: %d arcs with textures, B: %d)' % (txt, len(cs['a'].tex_arcs), len(cs['b'].tex_arcs)))
+                log('compare: %s' % txt)
+            submit(job, done, 'Comparing mods…')
+
+        def fill():
+            ct.delete(*ct.get_children())
+            groups = {}
+            for n, r in enumerate(cs['rows']):
+                groups.setdefault(r['key'], []).append(n)
+            for key in sorted(groups):
+                idx = groups[key]
+                st_counts = {}
+                for n in idx: st_counts[cs['rows'][n]['status']] = st_counts.get(cs['rows'][n]['status'], 0) + 1
+                gid = ct.insert('', 'end', iid='g:' + key, text=key, open=len(groups) <= 30,
+                                values=(', '.join('%d %s' % (v, k) for k, v in st_counts.items()), '', ''))
+                for n in idx:
+                    r = cs['rows'][n]
+                    ct.insert(gid, 'end', iid='r:%d' % n, text=r['texture'].split('\\')[-1],
+                              values=(r['status'], side_text(cs['a'], r['a']), side_text(cs['b'], r['b'])),
+                              tags=(r['status'],))
+
+        def cshow(*_):
+            iid = ct.focus()
+            if not iid.startswith('r:'):
+                for lab, inf in cells: lab.config(image='', text=''); inf.config(text='')
+                return
+            r = cs['rows'][int(iid[2:])]
+            cs['token'] += 1; token = cs['token']
+            mode = cbg.get()
+            for col, (sess, ki) in enumerate(((cs['a'], r['a']), (cs['b'], r['b']))):
+                lab, inf = cells[col]
+                if not ki:
+                    lab.config(image='', text='(not in this mod)'); inf.config(text=''); continue
+                inf.config(text=side_text(sess, ki) + '\n' + os.path.basename(r['arc_a'] if col == 0 else r['arc_b']))
+                if not sess.arcs[ki[0]].header(ki[1]).get('supported'):
+                    lab.config(image='', text='(no preview)'); continue
+                lab.config(image='', text='Loading…')
+                wd, ht = max(120, lab.winfo_width() - 8), max(120, lab.winfo_height() - 8)
+
+                def load(sess=sess, ki=ki, col=col, wd=wd, ht=ht):
+                    try:
+                        im = render(tex_decode(sess.arcs[ki[0]].read(ki[1])), mode, wd, ht)
+
+                        def put():
+                            if token != cs['token']: return
+                            cs['photos'][col] = ImageTk.PhotoImage(im)
+                            cells[col][0].config(image=cs['photos'][col], text='')
+                        root.after(0, put)
+                    except Exception as e:
+                        root.after(0, lambda e=e: cells[col][0].config(image='', text='Preview failed: %s' % e))
+                threading.Thread(target=load, daemon=True).start()
+
+        def save_csv():
+            if not cs['rows']:
+                messagebox.showinfo('Report', 'Compare two mods first.', parent=w); return
+            p = pick('save', 'Save the report', [('CSV', '*.csv')], initialfile='mod-compare.csv', defext='.csv', parent=w)
+            if p:
+                submit(lambda: write_compare_csv(cs['rows'], cs['a'], cs['b'], p), lambda r: log('report: %s' % p),
+                       'Writing report…')
+
+        def save_pngs():
+            rows = [r for r in cs['rows'] if r['status'] != 'same']
+            if not rows:
+                messagebox.showinfo('Export', 'No differing textures to export.', parent=w); return
+            d = pick('dir', 'Export the differing textures (A/ and B/) into…', parent=w)
+            if d:
+                submit(lambda: export_compare_pngs(rows, cs['a'], cs['b'], d, log),
+                       lambda n: messagebox.showinfo('Export', '%d PNG(s) written to\n%s' % (n, d), parent=w),
+                       'Exporting PNGs…')
+
+        b_cmp.config(command=run); b_csv.config(command=save_csv); b_pngs.config(command=save_pngs)
+        ct.bind('<<TreeviewSelect>>', cshow)
+        w.protocol('WM_DELETE_WINDOW', lambda: (close_sessions(), w.destroy()))
+        if st['s']:
+            va.set(st['s'].src)
+        w._cmp = dict(state=cs, va=va, vb=vb, run=run, tree=ct, show=cshow)
+        root._mhgu['compare'] = w
+        return w
 
     # ------------------------------------------------------------ export form
     def export_dialog(patch):
@@ -1620,9 +1975,10 @@ def gui(initial=None):
     for parent, txt, fn in (
             (bar, 'Open mod folder…', lambda: open_mod(folder=True)), (bar, 'Open mod zip…', lambda: open_mod()),
             (bar, 'Export original PNGs…', export_originals), (bar, 'Stage images from folder…', stage_folder),
-            (bar, 'Undo all', undo_all),
+            (bar, 'Undo all', undo_all), (bar, 'Compare mods…', lambda: compare_window()),
             (bar2, 'Export modified mod…', lambda: export_dialog(False)),
-            (bar2, 'Export patch (modified arcs only)…', lambda: export_dialog(True))):
+            (bar2, 'Export patch (modified arcs only)…', lambda: export_dialog(True)),
+            (bar2, 'Export unpacked changes…', export_unpacked)):
         ttk.Button(parent, text=txt, command=fn).pack(side='left', padx=2)
     if not dnd:
         ttk.Label(bar2, text='  (drag and drop off: run "pip install tkinterdnd2" to enable it)',
@@ -1648,8 +2004,8 @@ def gui(initial=None):
                 if not found: messagebox.showinfo('Stage', 'No image there matches a texture.')
                 return
             open_mod(p); return
-        if os.path.splitext(p)[1].lower() not in IMAGE_EXT:
-            messagebox.showinfo('Drop', 'Drop an image (PNG, JPG, TGA, …), a mod folder or a .zip.'); return
+        if os.path.splitext(p)[1].lower() not in IMAGE_EXT + RAW_EXT:
+            messagebox.showinfo('Drop', 'Drop an image (PNG, JPG, TGA, …), an MHGU .tex, a mod folder or a .zip.'); return
         t = None
         if target_iid and target_iid.startswith('t:'):
             _, k, i = target_iid.split(':'); t = (int(k), int(i))
@@ -1688,6 +2044,7 @@ def gui(initial=None):
     show()
     if initial: root.after(150, lambda: open_mod(initial))
     root._mhgu = dict(state=st, open_mod=open_mod, stage=stage, export_dialog=export_dialog, tree=tree,
+                      compare_window=compare_window, export_unpacked=export_unpacked,
                       fill_arc=fill_arc, show=show, pending=pending, dropped=lambda *a: dropped(*a), undo=undo)
     root.mainloop()
 
@@ -1714,7 +2071,14 @@ def main(argv=None):
     p.add_argument('--images', metavar='DIR', help='stage the images in DIR (export layout or unique texture names)')
     p.add_argument('--out', metavar='DEST', help='write the result: a folder, or a .zip file')
     p.add_argument('--patch', action='store_true', help='write only the modified arcs')
+    p.add_argument('--out-unpacked', metavar='DIR', help='only the changed textures, unpacked (.tex + .png)')
+    p.add_argument('--no-png', action='store_true', help='with --out-unpacked: no PNG copies')
     p.add_argument('--no-keep-alpha', action='store_true'); p.set_defaults(fn=cmd_mod)
+    p = sp.add_parser('compare', help='list the textures that differ between two mods (folders or zips)')
+    p.add_argument('mod_a'); p.add_argument('mod_b'); p.add_argument('--csv', metavar='FILE')
+    p.add_argument('--export-pngs', metavar='DIR'); p.add_argument('--all', action='store_true',
+                                                                    help='also list identical textures')
+    p.set_defaults(fn=cmd_compare)
     p = sp.add_parser('list'); p.add_argument('arc'); p.set_defaults(fn=cmd_list)
     p = sp.add_parser('export'); p.add_argument('arc'); p.add_argument('outdir')
     p.add_argument('--mips', action='store_true', help='also write every mip level'); p.set_defaults(fn=cmd_export)

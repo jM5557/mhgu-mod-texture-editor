@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 (2026-11-03)
+
+- *Export unpacked changes…*: only the changed textures, as MHGU `.tex` (+ optional PNG) in unpacked-arc
+  folders, with `_changes.json` (CLI: `mod … --out-unpacked DIR [--no-png]`).
+- `.tex` files can be staged directly (drop, *Replace…*, *Stage images from folder…*); a `.tex` wins over
+  its PNG copy.
+- *Compare mods…*: textures that differ between two mods (folders or zips), with previews, a CSV report
+  and PNG export (CLI: `compare A B [--csv F] [--export-pngs DIR] [--all]`).
+
 ## 1.0.0 (2026-11-03)
 
 First release.

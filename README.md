@@ -24,6 +24,11 @@ Dalamadur, …), and works with any MHGU `.arc`. Windows and Linux (Arch first; 
     (`MH4U Port/romfs/nativeNX/arc/enemy/em057_01.arc`), ready to copy over an installed mod.
 - **Bulk work**: export every original texture as PNG templates, then stage a whole folder of edited
   images at once (matched by that layout or by unique texture name).
+- **Unpacked changes**: save only the textures you changed, as ready MHGU `.tex` files (plus PNG copies)
+  in the layout of an unpacked arc: one folder per arc, then its internal paths. Copy them into other
+  unpacked mods, or apply them to another packed mod with *Stage images from folder…*.
+- **Compare two mods** (folders or zips, in any mix): every texture that is changed, only in A or only in B,
+  with side-by-side previews, a CSV report and PNG exports of both versions.
 - **Correct encoding**: each image is encoded in the format of the texture it replaces (BC1 / BC3 / BC4 /
   BC5 / RGBA8), with the mip chain, the Switch (Tegra X1 block-linear) memory layout and the original header.
   Keeps the original alpha (cut-outs) when your image has none, allows other sizes, warns on aspect changes.
@@ -66,6 +71,29 @@ Tips:
 - Install a patch by extracting it into the folder that contains `MH4U Port`, e.g. Ryujinx's
   `mods/contents/0100770008dd8000/`.
 
+### Reusing your changes in other mods
+
+*Export unpacked changes…* writes only the staged textures:
+```
+<folder>/MH4U Port/romfs/nativeNX/arc/enemy/em057_01/enemy/em057/em057_01/mod/em057_01_01_BM.tex
+         └──── arc path, minus .arc (one folder per arc) ────┘└────── path inside the arc ──────┘
+<folder>/…/em057_01_01_BM.png       (optional PNG copy)
+<folder>/_changes.json              (what was exported, from which mod)
+```
+- **Into an unpacked mod**: copy the arc folders over that mod's unpacked arcs, then repack them with your
+  usual arc tool. The `.tex` files are complete MHGU textures, and the internal paths are the arc's own.
+  Check that your unpacker uses the same folder and `.tex` naming.
+- **Into a packed mod**: open it here and use *Stage images from folder…* on the export folder. The `.tex`
+  files go in byte for byte; the PNG copies are skipped when their `.tex` is there.
+
+### Comparing two mods
+
+*Compare mods…* opens a window: pick mod A and mod B (each a folder or a zip), then *Compare*. Arcs are
+matched by their path from `romfs/` on, so a release zip and an unpacked folder line up. Textures are
+compared after decompression, so a repack alone does not count as a change. Statuses: **changed**,
+**only A**, **only B** (*List identical textures too* adds **same**). Select a row to see both versions;
+*Save report (CSV)…* and *Export differing textures as PNG…* (into `A/` and `B/`) keep the result.
+
 ### Stygian Zinogre's textures
 
 `MH4U Port/romfs/nativeNX/arc/enemy/em057_01.arc`, folder `enemy\em057\em057_01\mod\`:
@@ -85,6 +113,8 @@ python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --list
 python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --export-pngs originals
 python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out patch.zip --patch
 python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out modded_folder
+python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out-unpacked my_changes
+python mhgu_tex_tool.py compare stygian_zinogre-1.0.2.zip stygian_zinogre-1.0.3.zip --csv diff.csv
 python mhgu_tex_tool.py -h          # every command
 ```
 On Linux after `install.sh`, use `mhgu-texture-tool` instead of `python mhgu_tex_tool.py`.
