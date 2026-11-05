@@ -4,7 +4,7 @@ The GOLDEN hashes were produced by tools/tex.py of Scrimas/MH4U-port-to-MHGU (wh
 byte for byte against every MHGU monster texture) and checked equal to this tool's output when they were
 recorded: they pin the Switch block-linear layout and the TEX header.
 """
-import hashlib, os, shutil, sys, tempfile, unittest, zipfile
+import hashlib, json, os, shutil, sys, tempfile, unittest, zipfile
 
 import numpy as np
 from PIL import Image
@@ -231,6 +231,32 @@ class TestModSession(unittest.TestCase):
         (k2, i2), p = next(iter(found.items()))
         s2.stage(k2, i2, p)
         self.assertEqual(s2.staged[(k2, i2)]['tex'], s.staged[(k, i)]['tex'])
+
+    def test_export_unpacked_file_choices(self):
+        s = self.session()
+        k, _ = self.stage_body(s)
+        i = s.arcs[k].tex[0]
+        base = lambda d: os.path.join(self.dir, d, *self.arc_path[:-4].split('/'), 'enemy', 'em057', 'em057_01', 'mod',
+                                      'em057_01_01_BM')
+        for files, exts in (('tex', {'.tex'}), ('png', {'.png'}), ('both', {'.tex', '.png'})):
+            out = os.path.join(self.dir, 'u_' + files)
+            s.export_unpacked(out, files=files, log=lambda m: None)
+            got = {e for e in ('.tex', '.png') if os.path.isfile(base('u_' + files) + e)}
+            self.assertEqual(got, exts, files)
+            with open(os.path.join(out, '_changes.json')) as f:
+                info = json.load(f)
+            self.assertEqual(info['files'], files)
+            self.assertEqual(len(info['textures'][0]['files']), len(exts))
+        # a .png-only export can still be staged into another copy of the mod (re-encoded from the PNG)
+        s2 = self.session()
+        found, notes = s2.match_images(os.path.join(self.dir, 'u_png'))
+        self.assertEqual(len(found), 1)
+        (k2, i2), p = next(iter(found.items()))
+        s2.stage(k2, i2, p)
+        a = M.tex_decode(s2.staged[(k2, i2)]['tex']); b = M.tex_decode(s.staged[(k, i)]['tex'])
+        self.assertLess(np.abs(a.astype(int) - b.astype(int)).mean(), 3)
+        with self.assertRaises(ValueError):
+            s.export_unpacked(os.path.join(self.dir, 'x'), files='jpg', log=lambda m: None)
 
     def test_compare_zip_and_folder(self):
         a = self.session()

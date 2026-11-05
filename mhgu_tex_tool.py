@@ -10,8 +10,9 @@ replacements (Undo under the preview), then export the whole mod or a patch with
 folder or a zip.  Command line:
 
   mod     MOD.zip|FOLDER [--list] [--export-pngs DIR] [--images DIR] [--out DEST(.zip)] [--patch]
-          [--out-unpacked DIR [--no-png]]      the GUI flow without the GUI; --out-unpacked: only the changed
-                                               textures as .tex (+ .png) in unpacked-arc folders
+          [--out-unpacked DIR [--files tex|png|both]]
+                                               the GUI flow without the GUI; --out-unpacked: only the changed
+                                               textures as .tex and / or .png in unpacked-arc folders
   compare MOD_A MOD_B [--csv F] [--export-pngs DIR] [--all]
                                                textures that differ between two mods (folders or zips)
 
@@ -39,7 +40,7 @@ Requires Python 3.9+, numpy, Pillow (+ tkinterdnd2 for drag and drop).
 """
 import argparse, json, os, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
 
-__version__ = '1.1.1'
+__version__ = '1.2.0'
 
 import numpy as np
 
@@ -1110,29 +1111,44 @@ class ModSession:
                sum(len(self.staged_in(k)) for k in mods.values())))
         return len(files), n_mod
 
-    def export_unpacked(self, dest, with_png=True, log=print):
-        """only the staged textures, unpacked: DEST/<arc path minus .arc>/<texture path>.tex (+ .png), the layout of an
-        unpacked arc (one folder per arc, its internal paths). Copy it over other unpacked mods, or stage it into a
-        packed mod with Stage images from folder. Writes DEST/_changes.json."""
+    def export_unpacked(self, dest, files='both', log=print, with_png=None):
+        """only the staged textures, unpacked: DEST/<arc path minus .arc>/<texture path>.tex and / or .png, the layout of
+        an unpacked arc (one folder per arc, its internal paths). files: 'tex' | 'png' | 'both'. Copy it over other
+        unpacked mods, or stage it into a packed mod with Stage images from folder (both .tex and .png match).
+        Writes DEST/_changes.json. (with_png: the 1.1 argument, False = 'tex', True = 'both'.)"""
+        if with_png is not None:
+            files = 'both' if with_png else 'tex'
+        if files not in ('tex', 'png', 'both'):
+            raise ValueError('files must be tex, png or both')
         if not self.staged:
             raise ValueError('nothing is staged')
         self.check_dest(dest)
-        items = []
+        items, fallback = [], []
         for (k, i) in sorted(self.staged):
             a, st = self.arcs[k], self.staged[(k, i)]
             path = a.entries[i][0]
             base = os.path.join(dest, *a.stem.split('/'), *path.split('\\'))
-            atomic_write_file(base + '.tex', st['tex'])
             h = tex_parse(st['tex'])
-            if with_png and h['supported']:
-                save_png(tex_decode(st['tex']), base + '.png')
-            items.append(dict(arc=a.logical, texture=path, file=rel_join(a.stem, path) + '.tex',
+            want_png = files in ('png', 'both') and h['supported']
+            want_tex = files in ('tex', 'both') or not h['supported']   # no PNG possible: keep the .tex
+            if files == 'png' and not h['supported']:
+                fallback.append(path)
+            written = []
+            if want_tex:
+                atomic_write_file(base + '.tex', st['tex']); written.append(rel_join(a.stem, path) + '.tex')
+            if want_png:
+                texture_png(st['tex'], base + '.png'); written.append(rel_join(a.stem, path) + '.png')
+            items.append(dict(arc=a.logical, texture=path, files=written,
                               format=h['fmt_name'], width=h['width'], height=h['height'],
                               source_image=os.path.basename(st['src'])))
-            log('  %s' % rel_join(a.stem, path))
+            log('  %s' % ', '.join(os.path.basename(w) for w in written) + '   (%s)' % rel_join(a.stem, path))
         with open(long_path(os.path.join(dest, '_changes.json')), 'w', encoding='utf-8') as f:
-            json.dump(dict(tool='MHGU Mod Texture Editor %s' % __version__, mod=self.src, textures=items), f, indent=1)
-        log('%d changed texture(s) written unpacked to %s%s' % (len(items), dest, ' (+ PNG copies)' if with_png else ''))
+            json.dump(dict(tool='MHGU Mod Texture Editor %s' % __version__, mod=self.src, files=files,
+                           textures=items), f, indent=1)
+        for p in fallback:
+            log('  note: %s cannot be shown as PNG (format not supported); wrote its .tex instead' % p)
+        log('%d changed texture(s) written unpacked to %s (%s)' % (
+            len(items), dest, {'tex': '.tex', 'png': '.png', 'both': '.tex + .png'}[files]))
         return len(items)
 
     def close(self):
@@ -1290,7 +1306,7 @@ def cmd_mod(a):
         if a.out_unpacked:
             if not s.staged:
                 sys.exit('nothing to export: no image matched a texture')
-            s.export_unpacked(a.out_unpacked, with_png=not a.no_png)
+            s.export_unpacked(a.out_unpacked, files='tex' if a.no_png else a.unpacked_files)
     finally:
         s.close()
 
@@ -1739,12 +1755,32 @@ def gui(initial=None):
         except ValueError as e:
             messagebox.showerror('Export unpacked changes', str(e)); return
         k, i = sorted(s.staged)[0]
-        sample = os.path.join(d, *s.arcs[k].stem.split('/'), *s.arcs[k].entries[i][0].split('\\')) + '.tex'
-        ans = messagebox.askyesnocancel('Export unpacked changes', (
-            'Writes only the %d changed texture(s), unpacked, one folder per arc, e.g.\n\n%s\n\n'
-            'Also save a PNG copy next to each .tex?') % (len(s.staged), sample))
-        if ans is None: return
-        submit(lambda: s.export_unpacked(d, with_png=ans, log=log),
+        sample = os.path.join(d, *s.arcs[k].stem.split('/'), *s.arcs[k].entries[i][0].split('\\'))
+        w = tk.Toplevel(root); w.title('Export unpacked changes'); w.transient(root); w.resizable(False, False)
+        f = ttk.Frame(w, padding=12); f.pack(fill='both', expand=True)
+        ttk.Label(f, text='Only the %d changed texture(s), unpacked, one folder per arc.' % len(s.staged),
+                  font=('TkDefaultFont', 10, 'bold')).pack(anchor='w')
+        ttk.Label(f, text='Files to write:').pack(anchor='w', pady=(10, 2))
+        files = tk.StringVar(value=load_settings().get('unpacked_files', 'both'))
+        for val, text in (('both', '.tex and .png'),
+                          ('tex', '.tex only: ready MHGU textures, for unpacked mods and re-staging'),
+                          ('png', '.png only: images to edit, view or stage into other mods')):
+            ttk.Radiobutton(f, text=text, variable=files, value=val, command=lambda: upd()).pack(anchor='w', padx=(12, 0))
+        pv = ttk.Label(f, text='', wraplength=620, justify='left', foreground='#333'); pv.pack(anchor='w', pady=(10, 0))
+
+        def upd():
+            ext = {'both': '.tex  +  .png', 'tex': '.tex', 'png': '.png'}[files.get()]
+            pv.config(text='e.g. %s%s' % (sample, ext))
+        upd()
+        res = {}
+        bf = ttk.Frame(f); bf.pack(anchor='e', pady=(12, 0))
+        ttk.Button(bf, text='Export', command=lambda: (res.update(files=files.get()), w.destroy())).pack(side='left', padx=4)
+        ttk.Button(bf, text='Cancel', command=w.destroy).pack(side='left')
+        w.bind('<Escape>', lambda e: w.destroy())
+        w.grab_set(); w.wait_window()
+        if 'files' not in res: return
+        save_settings(unpacked_files=res['files'])
+        submit(lambda: s.export_unpacked(d, files=res['files'], log=log),
                lambda n: messagebox.showinfo('Export unpacked changes', '%d texture(s) written to\n%s' % (n, d)),
                'Exporting unpacked changes…')
 
@@ -2083,8 +2119,10 @@ def main(argv=None):
     p.add_argument('--images', metavar='DIR', help='stage the images in DIR (export layout or unique texture names)')
     p.add_argument('--out', metavar='DEST', help='write the result: a folder, or a .zip file')
     p.add_argument('--patch', action='store_true', help='write only the modified arcs')
-    p.add_argument('--out-unpacked', metavar='DIR', help='only the changed textures, unpacked (.tex + .png)')
-    p.add_argument('--no-png', action='store_true', help='with --out-unpacked: no PNG copies')
+    p.add_argument('--out-unpacked', metavar='DIR', help='only the changed textures, unpacked')
+    p.add_argument('--files', dest='unpacked_files', choices=['tex', 'png', 'both'], default='both',
+                   help='with --out-unpacked: which files to write (default both)')
+    p.add_argument('--no-png', action='store_true', help=argparse.SUPPRESS)        # 1.1: same as --files tex
     p.add_argument('--no-keep-alpha', action='store_true'); p.set_defaults(fn=cmd_mod)
     p = sp.add_parser('compare', help='list the textures that differ between two mods (folders or zips)')
     p.add_argument('mod_a'); p.add_argument('mod_b'); p.add_argument('--csv', metavar='FILE')

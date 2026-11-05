@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (2026-11-04)
+
+- *Export unpacked changes…* asks which files to write: .tex and .png, .tex only, or .png only (remembered).
+  CLI: `mod … --out-unpacked DIR --files tex|png|both` (`--no-png` still works, as `--files tex`).
+  `_changes.json` lists the files written for each texture.
+
 ## 1.1.1 (2026-11-04)
 
 - *Export differing textures as PNG* (Compare mods) now goes through the same route as *Export original PNGs*

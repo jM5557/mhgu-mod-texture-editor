@@ -24,8 +24,8 @@ Dalamadur, …), and works with any MHGU `.arc`. Windows and Linux (Arch first; 
     (`MH4U Port/romfs/nativeNX/arc/enemy/em057_01.arc`), ready to copy over an installed mod.
 - **Bulk work**: export every original texture as PNG templates, then stage a whole folder of edited
   images at once (matched by that layout or by unique texture name).
-- **Unpacked changes**: save only the textures you changed, as ready MHGU `.tex` files (plus PNG copies)
-  in the layout of an unpacked arc: one folder per arc, then its internal paths. Copy them into other
+- **Unpacked changes**: save only the textures you changed, as ready MHGU `.tex` files, PNGs, or both, in
+  the layout of an unpacked arc: one folder per arc, then its internal paths. Copy them into other
   unpacked mods, or apply them to another packed mod with *Stage images from folder…*.
 - **Compare two mods** (folders or zips, in any mix): every texture that is changed, only in A or only in B,
   with side-by-side previews, a CSV report and PNG exports of both versions.
@@ -73,18 +73,20 @@ Tips:
 
 ### Reusing your changes in other mods
 
-*Export unpacked changes…* writes only the staged textures:
+*Export unpacked changes…* writes only the staged textures, as **.tex and .png**, **.tex only** or
+**.png only** (your choice is remembered):
 ```
 <folder>/MH4U Port/romfs/nativeNX/arc/enemy/em057_01/enemy/em057/em057_01/mod/em057_01_01_BM.tex
          └──── arc path, minus .arc (one folder per arc) ────┘└────── path inside the arc ──────┘
-<folder>/…/em057_01_01_BM.png       (optional PNG copy)
+<folder>/…/em057_01_01_BM.png       (with .png or both)
 <folder>/_changes.json              (what was exported, from which mod)
 ```
 - **Into an unpacked mod**: copy the arc folders over that mod's unpacked arcs, then repack them with your
   usual arc tool. The `.tex` files are complete MHGU textures, and the internal paths are the arc's own.
   Check that your unpacker uses the same folder and `.tex` naming.
 - **Into a packed mod**: open it here and use *Stage images from folder…* on the export folder. The `.tex`
-  files go in byte for byte; the PNG copies are skipped when their `.tex` is there.
+  files go in byte for byte; the PNG copies are skipped when their `.tex` is there. A *.png only* export
+  works too: the PNGs are encoded again, like any replacement image.
 
 ### Comparing two mods
 
@@ -113,7 +115,7 @@ python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --list
 python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --export-pngs originals
 python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out patch.zip --patch
 python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out modded_folder
-python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out-unpacked my_changes
+python mhgu_tex_tool.py mod stygian_zinogre-1.0.3.zip --images my_edits --out-unpacked my_changes --files png
 python mhgu_tex_tool.py compare stygian_zinogre-1.0.2.zip stygian_zinogre-1.0.3.zip --csv diff.csv
 python mhgu_tex_tool.py -h          # every command
 ```
