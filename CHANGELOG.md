@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1 (2026-11-04)
+
+- *Export differing textures as PNG* (Compare mods) now goes through the same route as *Export original PNGs*
+  (whole arc through `load_arc`, every texture through one shared `texture_png`), so both exports always
+  write the same PNGs, alpha included. A test checks the compare export against the main export byte for
+  byte, with a gradient and a cut-out in the alpha.
+
 ## 1.1.0 (2026-11-03)
 
 - *Export unpacked changes…*: only the changed textures, as MHGU `.tex` (+ optional PNG) in unpacked-arc

@@ -39,7 +39,7 @@ Requires Python 3.9+, numpy, Pillow (+ tkinterdnd2 for drag and drop).
 """
 import argparse, json, os, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
 
-__version__ = '1.1.0'
+__version__ = '1.1.1'
 
 import numpy as np
 
@@ -483,6 +483,11 @@ def load_png(path):
     return np.array(im.convert('RGBA')), has_alpha
 
 
+def texture_png(tex_bytes, path, mip=0):
+    """the one way every export writes a texture as PNG: decode the TEX (alpha included), save it as RGBA."""
+    save_png(tex_decode(tex_bytes, mip), path)
+
+
 def save_png(img, path):
     from PIL import Image
     path = long_path(path)
@@ -558,10 +563,10 @@ def export_all(arc_path, outdir, all_mips=False, log=print, ents=None):
         if not h.get('supported'):
             log('  skip %s (%s)' % (p, describe(h))); continue
         dst = os.path.join(outdir, png_rel(p))
-        save_png(tex_decode(ents[i][2]), dst)
+        texture_png(ents[i][2], dst)
         if all_mips:
             for m in range(1, h['mips']):
-                save_png(tex_decode(ents[i][2], m), dst[:-4] + '.mip%d.png' % m)
+                texture_png(ents[i][2], dst[:-4] + '.mip%d.png' % m, m)
         info.append(dict(path=p, png=png_rel(p), format=h['fmt_name'], fmt_byte=h['fmt'],
                          width=h['width'], height=h['height'], mips=h['mips']))
         log('  %s -> %s' % (p, png_rel(p)))
@@ -1221,13 +1226,20 @@ def write_compare_csv(rows, a, b, path):
 def export_compare_pngs(rows, a, b, dest, log=print):
     """dest/A/<arc path>/<texture>.png and dest/B/... for every differing texture."""
     n = 0
+    loaded = {}
     for r in rows:
         stem = r['key'][:-4] if r['key'].endswith('.arc') else r['key']
         for side, s, ki in (('A', a, r['a']), ('B', b, r['b'])):
-            if not ki or not s.arcs[ki[0]].header(ki[1]).get('supported'):
+            if not ki:
                 continue
-            save_png(tex_decode(s.arcs[ki[0]].read(ki[1])),
-                     os.path.join(dest, side, *stem.split('/'), *r['texture'].split('\\')) + '.png')
+            # the same route as Export original PNGs: the whole arc through load_arc, its TEX entries through
+            # tex_parse / texture_png
+            if loaded.get(side, (None,))[0] != ki[0]:          # one arc per side in memory (rows come arc by arc)
+                loaded[side] = (ki[0], load_arc(s.arcs[ki[0]].fs_path)[1])
+            path, th, data = loaded[side][1][ki[1]]
+            if not tex_parse(data).get('supported'):
+                continue
+            texture_png(data, os.path.join(dest, side, *stem.split('/'), *path.split('\\')) + '.png')
             n += 1
     log('%d PNG(s) written to %s (A/ and B/)' % (n, dest))
     return n

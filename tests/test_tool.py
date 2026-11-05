@@ -7,6 +7,7 @@ recorded: they pin the Switch block-linear layout and the TEX header.
 import hashlib, os, shutil, sys, tempfile, unittest, zipfile
 
 import numpy as np
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import mhgu_tex_tool as M  # noqa: E402
@@ -257,6 +258,31 @@ class TestModSession(unittest.TestCase):
         M.write_compare_csv(rows, a, b, csv_path)
         self.assertEqual(len(open(csv_path).read().strip().splitlines()), 4)
         self.assertEqual(M.export_compare_pngs(rows, a, b, os.path.join(self.dir, 'pngs'), log=lambda m: None), 4)
+
+    def test_compare_pngs_match_main_export_with_alpha(self):
+        alpha = np.full((64, 256), 255, np.uint8); alpha[:, :128] = np.arange(128) * 2; alpha[:16, :16] = 0
+        src = os.path.join(self.dir, 'alpha_src.png')
+        M.save_png(smooth(256, 64, np.tile(alpha, (1, 1))[:64, :256]), src)
+        a, b = self.session(), self.session()
+        k = next(k for k in b.tex_arcs if b.arcs[k].logical == self.arc_path)
+        b.stage(k, b.arcs[k].tex[0], src)
+        out_b = os.path.join(self.dir, 'b.zip')
+        b.export(out_b, True, False, log=lambda m: None)
+        b2 = M.ModSession(out_b, log=lambda m: None); self.addCleanup(b2.close)
+        rows = M.compare_mods(a, b2, log=lambda m: None)
+        cmp_dir, main_dir = os.path.join(self.dir, 'cmp'), os.path.join(self.dir, 'main')
+        M.export_compare_pngs(rows, a, b2, cmp_dir, log=lambda m: None)
+        b2.export_pngs(main_dir, log=lambda m: None)
+        rel = os.path.join(*self.arc_path[:-4].split('/')[1:], 'enemy', 'em057', 'em057_01', 'mod', 'em057_01_01_BM.png')
+        with open(os.path.join(cmp_dir, 'B', rel), 'rb') as f1, \
+                open(os.path.join(main_dir, *self.arc_path[:-4].split('/'), 'enemy', 'em057', 'em057_01', 'mod',
+                                  'em057_01_01_BM.png'), 'rb') as f2:
+            self.assertEqual(f1.read(), f2.read())
+        with Image.open(os.path.join(cmp_dir, 'B', rel)) as im:
+            got = np.array(im)[..., 3]
+        self.assertEqual(im.mode, 'RGBA')
+        self.assertTrue((got[:16, :16] < 10).all())
+        self.assertTrue((np.abs(got[20:, :128].astype(int) - alpha[20:, :128]) <= 8).all())
 
     def test_folder_source_refuses_writing_into_itself(self):
         src = os.path.join(self.dir, 'src')
